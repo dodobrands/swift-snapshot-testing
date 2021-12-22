@@ -23,7 +23,7 @@ extension Diffing where Value == UIImage {
       toData: { $0.pngData() ?? emptyImage().pngData()! },
       fromData: { UIImage(data: $0, scale: imageScale)! }
     ) { old, new in
-      guard !compare(old, new, precision: precision) else { return nil }
+      guard !compare(old, new, precision: Double(precision), colorPrecision: Double(precision)) else { return nil }
       let difference = SnapshotTesting.diff(old, new)
       let message = new.size == old.size
         ? "Newly-taken snapshot does not match reference."
@@ -138,5 +138,107 @@ private func diff(_ old: UIImage, _ new: UIImage) -> UIImage {
   let differenceImage = UIGraphicsGetImageFromCurrentImageContext()!
   UIGraphicsEndImageContext()
   return differenceImage
+}
+
+fileprivate func newContext(for image: CGImage, bytesPerRow: Int, data: UnsafeMutableRawPointer? = nil) -> CGContext? {
+    var context: CGContext? = nil
+
+    if let space: CGColorSpace = image.colorSpace {
+        context = CGContext(
+            data: data,
+            width: image.width,
+            height: image.height,
+            bitsPerComponent: image.bitsPerComponent,
+            bytesPerRow: bytesPerRow, space: space,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )
+        context?.draw(image, in: CGRect(origin: .zero, size: CGSize(width: image.width, height: image.height)))
+    }
+
+    return context
+}
+
+fileprivate func byteBuffer(with bytesCount: Int, alignment: Int) -> UnsafeMutableRawPointer {
+    let buffer: UnsafeMutableRawPointer = UnsafeMutableRawPointer.allocate(byteCount: bytesCount, alignment: alignment)
+    buffer.initializeMemory(as: UInt8.self, repeating: 0, count: bytesCount)
+    return buffer
+}
+
+fileprivate func compare(_ referenceImage: UIImage, _ newImage: UIImage, precision: Double, colorPrecision: Double) -> Bool {
+    guard
+        let newImageData: Data = newImage.pngData(),
+        let refCGImage: CGImage = referenceImage.cgImage,
+        let newCGImage: CGImage = UIImage(data: newImageData)?.cgImage,
+        newImage.size != .zero,
+        referenceImage.size != .zero,
+        referenceImage.size == newImage.size
+    else {
+        return false
+    }
+
+    var isEqual: Bool = false
+
+    let minBytesPerRow: Int = min(refCGImage.bytesPerRow, newCGImage.bytesPerRow)
+    let bytesCount: Int = minBytesPerRow * refCGImage.height
+    let alignment: Int = MemoryLayout<UInt32>.alignment
+
+    let refImageBytesArray: UnsafeMutableRawPointer = byteBuffer(with: bytesCount, alignment: alignment)
+    let newImageBytesArray: UnsafeMutableRawPointer = byteBuffer(with: bytesCount, alignment: alignment)
+
+    var failedPixelsCount: Int = 0
+
+    if
+        let _: CGContext = newContext(for: newCGImage, bytesPerRow: minBytesPerRow, data: newImageBytesArray),
+        let _: CGContext = newContext(for: refCGImage, bytesPerRow: minBytesPerRow, data: refImageBytesArray)
+    {
+        isEqual = true
+        let bytesInPixel: Int = MemoryLayout<UInt32>.size
+        let pixelsCount: Int = bytesCount / bytesInPixel
+        let pixelComparisonPrecision: Double = 1.0 - precision
+        let colorComparisonPrecision: Double = 1.0 - colorPrecision
+        let pixelStride: Int = MemoryLayout<UInt32>.stride
+        let colorStride: Int = MemoryLayout<UInt8>.stride
+
+        for pixelIndex: Int in 0..<pixelsCount {
+            let currentPixelOffset: Int = pixelIndex * pixelStride
+            let refPixelPointer: UnsafeMutableRawPointer = refImageBytesArray.advanced(by: currentPixelOffset)
+            let newPixelPointer: UnsafeMutableRawPointer = newImageBytesArray.advanced(by: currentPixelOffset)
+
+            let refPixelRepresentation: UInt32 = refPixelPointer.load(as: UInt32.self)
+            let newPixelRepresentation: UInt32 = newPixelPointer.load(as: UInt32.self)
+
+            if refPixelRepresentation != newPixelRepresentation {
+                if colorComparisonPrecision > 0.0 {
+                    for colorIndex: Int in 0..<bytesInPixel {
+                        let currentColorOffset: Int = colorIndex * colorStride
+
+                        let refColorPointer: UnsafeMutableRawPointer = refPixelPointer.advanced(by: currentColorOffset)
+                        let newColorPointer: UnsafeMutableRawPointer = newPixelPointer.advanced(by: currentColorOffset)
+
+                        let refColorValue: UInt8 = refColorPointer.load(as: UInt8.self)
+                        let newColorValue: UInt8 = newColorPointer.load(as: UInt8.self)
+
+                        let colorDiff: Double = Double(abs(Int(refColorValue) - Int(newColorValue))) / Double(255.0)
+                        if  colorDiff > colorComparisonPrecision {
+                            failedPixelsCount += 1
+                            break
+                        }
+                    }
+                } else {
+                    failedPixelsCount += 1
+                }
+            }
+
+            if Double(failedPixelsCount) / Double(pixelsCount) > pixelComparisonPrecision {
+                isEqual = false
+                break
+            }
+        }
+    }
+
+    refImageBytesArray.deallocate()
+    newImageBytesArray.deallocate()
+
+    return isEqual
 }
 #endif
