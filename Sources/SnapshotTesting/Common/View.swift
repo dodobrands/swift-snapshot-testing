@@ -957,6 +957,14 @@
         view.setNeedsLayout()
         view.layoutIfNeeded()
       }
+        
+      // Frame is still zero after autosize
+      if view.frame.width == 0 || view.frame.height == 0 {
+        // Try to calculate size by using UIView.layoutFittingCompressedSize
+        // or UIView.layoutFittingExpandedSize
+        let size = view.systemLayoutSizeFitting(size)
+        view.frame = CGRect(origin: .zero, size: size)
+      }
 
       return dispose
     }
